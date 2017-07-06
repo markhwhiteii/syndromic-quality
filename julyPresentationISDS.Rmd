@@ -4,14 +4,15 @@ author: "Mark White | markwhiteii@gmail.com"
 date: "July 27, 2017"
 output: html_document
 ---
+<base target="_top"/>
 
-The quality of the inferences we make from data are only as good as the quality of the data themselves; it is important to ensure the syndromic data received from facilities are timely and complete. This document describes a number of functions I have written at Kansas Department of Health and Environment to perform data quality checks on Kansas emergency room data from [NSSP's BioSense Platform](https://www.cdc.gov/nssp/biosense/index.html). I will be taking a [`tidyverse`](http://tidyverse.org/) approach, primarily relying on the `dplyr` package and the pipe operator (`%>%`). I will cover three topics:  
+The quality of the inferences we make from data is only as good as the quality of the data themselves; it is important to ensure the syndromic data received from facilities are timely and complete. This document describes a number of functions I have written at Kansas Department of Health and Environment to perform data quality checks on Kansas emergency room data from [NSSP's BioSense Platform](https://www.cdc.gov/nssp/biosense/index.html). I will be taking a [`tidyverse`](http://tidyverse.org/) approach, primarily relying on the `dplyr` package and the pipe operator (`%>%`). I will cover three topics:  
 
 1. Pipes (`%>%`)  
 2. Visit-arrival lag check  
 3. Record count check  
 
-The code for these functions can be found [here](https://github.com/markhwhiteii/syndromic-quality/tree/master/R); I also provide the data I used for the examples [here](https://github.com/markhwhiteii/syndromic-quality/tree/master/data). These data are masked: I took emergency room data, but replaced facility names with Star Wars planets or character names, replaced facility identification numbers with random digits, and replaced visit identification numbers with random strings of letters and numbers.  
+The code for these functions can be found [at GitHub](https://github.com/markhwhiteii/syndromic-quality/tree/master/R); I also provide the data I used for the examples [at GitHub](https://github.com/markhwhiteii/syndromic-quality/tree/master/data). These data are masked: I took emergency room data, but replaced facility names with Star Wars planets or character names, replaced facility identification numbers with random digits, and replaced visit identification numbers with random strings of letters and numbers.  
 
 The packages I use in this document are: `dplyr`, `tidyr`, `lubridate`, and `RODBC`.
 
@@ -20,7 +21,7 @@ The pipe (`%>%`) is a popular operator used in many packages, including `dplyr`.
 
 ```{r include=FALSE}
 options(warn=-1)
-setwd("C:/Users/mark.white/Desktop/ISDS")
+setwd("~/ISDS")
 library(dplyr) # load package
 ```
 ```{r}
@@ -44,7 +45,7 @@ mean(c(0:10)) # again, mean of 0, 1, 2, 3, 4, ... 10
 Why use this operator? First, it makes working with large data frames faster. Instead of assigning multiple objects to our working environment, we can just pass multiple operations through a "pipe chain" that does it all in one step. Second, it makes code that wrangles data easier to read (once you get a hang of working with pipes, at least). More details on how the pipe works and more information about it's performance can be found in Hadley Wickham's *R for Data Science* chapter on pipes, [found here.](http://r4ds.had.co.nz/pipes.html)  
 
 ## Pipe chains and `dplyr`
-Let's compare how we could manipulate and summarize data using `dplyr` and `%>%` versus an approach in `base` R. We will use the `starwars` dataset, which comes included with version `0.7.1` of `dplyr`. These data include information about Star Wars characters. What we are going to do is calculate body mass index (BMI) of each character and then compare the BMI of male and female characters. Let's load and take a look at the data:  
+Let's compare how we could manipulate and summarize data using `dplyr` and `%>%` versus an approach in `base` R. We will use the `starwars` data set, which comes included with version `0.7.1` of `dplyr`. These data include information about Star Wars characters. What we are going to do is calculate body mass index (BMI) of each character and then compare the BMI of male and female characters. Let's load and take a look at the data:  
 
 ```{r}
 data(starwars) # load data from dplyr
@@ -90,7 +91,7 @@ Let's now turn to how `dplyr` can be used to take raw emergency department data,
 
 Syndromic surveillance requires very recent data, so a helpful check is making sure we are getting data in a timely fashion from emergency facilities. One way of doing this is, for each facility and for a given time period, getting the average time between (a) when a patient visited the emergency department and (b) when the first record for that patient arrived to the NSSP BioSense Platform.  
 
-This function is named `valag` in the code linked at the top of this page. Each of these functions requires a database connection, and I have coded them to be used with the `RODBC` package. (You can see [last month's](https://vimeo.com/223487612) ISDS R Users Group presentation for more information on setting up a connection using `RODBC`). But for now, I will use the masked data that has already been pulled down using `RODBC`.  
+This function is named `valag` in the code linked at the top of this page. Each of these functions requires a database connection, and I have coded them to be used with the `RODBC` package. (You can see [the Vimeo video](https://vimeo.com/223487612) for the ISDS R Users Group, June 2017 presentation for more information on setting up a connection using `RODBC`). But for now, I will use the masked data that has already been pulled down using `RODBC`.  
 
 We can walk through it line-by-line:  
 
@@ -99,7 +100,7 @@ names <- read.csv("facilityKey.csv") %>% # get data table with faciltiy names
   mutate(C_Biosense_Facility_ID=as.factor(C_Biosense_Facility_ID)) # make facility a factor
 ```
 
-Note that every time I use the code `read.csv` here, the actual function will pull data down from a database using `RODBC`. In our data, the name of the facility is stored in a different table than where all the records are stored; however, the records do include the facility ID. So, the first thing I do is pull down the facility IDs and names from the "master facility table." I take this data, save the ID as a factor (since is a number, R wants to make it numeric), and I assign it to a data frame called `names`. Let's look at the `head` of the data:  
+Note that every time I use the code `read.csv` here, the actual function will pull data down from a database using `RODBC`. In our data, the name of the facility is stored in a different table than where all the records are stored; however, the records do include the facility ID. So, the first thing I do is pull down the facility IDs and names from the Master Facility Table (MFT). I take this data, save the ID as a factor (since is a number, R wants to make it numeric), and I assign it to a data frame called `names`. Let's look at the `head` of the data:  
 
 ```{r}
 head(names) # looking at first six rows
@@ -120,11 +121,11 @@ out <- read.csv("valagData.csv") %>% # fetch data
   right_join(names, ., by="C_Biosense_Facility_ID") # take that data and right join it with facility names
 ```
 
-The first line shows us that we are going to be creating an object named `out`. The first thing we do is bring in data (again, the function replaces this `read.csv` function with a query to a database). This raw data is then passed on to the next line using `%>%`. Each patient visit has its own ID, and the second line in this chunk groups the data set by these IDs; any operation we do now will be done separately for each group! We want to only look at the record that arrived *first*, so the next line will use `slice` to only get the row with the minimum (`which.min`) date and time of arrival. I've found that sometimes multiple records for one visit can come at once, so if there is multiple at the same time, the next line does `slice` again to only take `1` record from each group. This ensures that our dataset now has *one* record for each patient visit, and this *one* record is also the one that arrived to the BioSense Platform first.  
+The first line shows us that we are going to be creating an object named `out`. The first thing we do is bring in data (again, the function replaces this `read.csv` function with a query to a database). This raw data is then passed on to the next line using `%>%`. Each patient visit has its own ID, and the second line in this chunk groups the data set by these IDs; any operation we do now will be done separately for each group! We want to only look at the record that arrived *first*, so the next line will use `slice` to only get the row with the minimum (`which.min`) date and time of arrival. I've found that sometimes multiple records for one visit can come at once, so if there is multiple at the same time, the next line does `slice` again to only take `1` record from each group. This ensures that our data set now has *one* record for each patient visit, and this *one* record is also the one that arrived to the BioSense Platform first.  
 
 Then we calculate the actual variable of interest using `mutate`. This new variable is called `lag`, and it is the difference between the date times of the arrival of the record and the time of the visit. I use the function `difftime` to use this, setting explicitly the time as `hours`. I also surround this whole expression with `as.numeric` so that it doesn't save the variable as a date, but instead a number.  
 
-We then want to group by facility instead of patient visit. You could technically re-group a dataset in one step, but I prefer to do it in two steps for clarity. I `ungroup` the data, and then re-group it by the facility ID. Then we use `summarise` to create a variable called `First_Message`, which is defined as the mean of the `lag`, removing `NA` values (`na.rm=TRUE`). I also use `round` to round this mean to the nearest two decimal points.  
+We then want to group by facility instead of patient visit. You could technically re-group a data set in one step, but I prefer to do it in two steps for clarity. I `ungroup` the data, and then re-group it by the facility ID. Then we use `summarise` to create a variable called `First_Message`, which is defined as the mean of the `lag`, removing `NA` values (`na.rm=TRUE`). I also use `round` to round this mean to the nearest two decimal points.  
 
 The only issue here is that it will return facility ID numbers, not the facility names. So the last two lines will merge this output with facility names. If we try to join data frames by a factor with different factor levels, we will get an error. So the `mutate` line (second to last in this chunk) makes the facility ID a factor, but note that I specify the levels as the levels from the `names` data, so that the two variables have the same factor levels.  
 
@@ -212,7 +213,7 @@ This will return the output generated above. When I ran this last, it was about 
 
 # 3. Records count
 
-We would also like to know how many records are coming in per facility. This code will return a dataset that has a row for each day of a month and two columns per facility: one that has the number of record *arrivals* for that day and another column that has the number of patient *visits* for that day. This code will also use `tidyr` and `lubridate` packages, which help reshape data and handle dates, respectively. The code will follow this structure: first, we count the number of visits in a given day; second, we count the number of record arrivals in a given day; third, we merge these two together and arrange them in a tidy way. In the R code document at the beginning of this page, the function is the `rc` function. Let's look at the first part:  
+We would also like to know how many records are coming in per facility. This code will return a data set that has a row for each day of a month and two columns per facility: one that has the number of record *arrivals* for that day and another column that has the number of patient *visits* for that day. This code will also use `tidyr` and `lubridate` packages, which help reshape data and handle dates, respectively. The code will follow this structure: first, we count the number of visits in a given day; second, we count the number of record arrivals in a given day; third, we merge these two together and arrange them in a tidy way. In the R code document at the beginning of this page, the function is the `rc` function. Let's look at the first part:  
 
 ```{r include=FALSE}
 library(tidyr) # load package
@@ -348,4 +349,8 @@ rc(channel=odbcConnect("Biosense_Platform", "BIOSENSE\\username", "password"),
 
 # Conclusion
 
-These were a few functions we have used to keep track of how quicky and if data are coming in. Hopefully you find them useful! Again, the data and code can be found [here](https://github.com/markhwhiteii/syndromic-quality). I have written a number of other functions, such as checking for null and invalid fields, that I did not have time to touch on. If you want code for those functions, or have any other questions, please feel free to contact me, markhwhiteii@gmail.com.  
+These were a few functions we have used to keep track of how quickly and if data are coming in. Hopefully you find them useful! Again, the data and code can be found [at GitHub](https://github.com/markhwhiteii/syndromic-quality). I have written a number of other functions, such as checking for null and invalid fields, that I did not have time to touch on. If you want code for those functions, or have any other questions, please feel free to contact me, markhwhiteii@gmail.com.  
+<br>
+<br>
+<br>
+<br>
