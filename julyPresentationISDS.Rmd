@@ -1,0 +1,351 @@
+---
+title: 'Data quality monitoring for syndromic surveillance using R: A tidy approach'
+author: "Mark White | markwhiteii@gmail.com"
+date: "July 27, 2017"
+output: html_document
+---
+
+The quality of the inferences we make from data are only as good as the quality of the data themselves; it is important to ensure the syndromic data received from facilities are timely and complete. This document describes a number of functions I have written at Kansas Department of Health and Environment to perform data quality checks on Kansas emergency room data from [NSSP's BioSense Platform](https://www.cdc.gov/nssp/biosense/index.html). I will be taking a [`tidyverse`](http://tidyverse.org/) approach, primarily relying on the `dplyr` package and the pipe operator (`%>%`). I will cover three topics:  
+
+1. Pipes (`%>%`)  
+2. Visit-arrival lag check  
+3. Record count check  
+
+The code for these functions can be found [here](https://github.com/markhwhiteii/syndromic-quality/tree/master/R); I also provide the data I used for the examples [here](https://github.com/markhwhiteii/syndromic-quality/tree/master/data). These data are masked: I took emergency room data, but replaced facility names with Star Wars planets or character names, replaced facility identification numbers with random digits, and replaced visit identification numbers with random strings of letters and numbers.  
+
+The packages I use in this document are: `dplyr`, `tidyr`, `lubridate`, and `RODBC`.
+
+# 1. Pipes
+The pipe (`%>%`) is a popular operator used in many packages, including `dplyr`. Basically, it takes whatever is on the left-hand side and places it into whatever function is on the right-hand side:  
+
+```{r include=FALSE}
+options(warn=-1)
+setwd("C:/Users/mark.white/Desktop/ISDS")
+library(dplyr) # load package
+```
+```{r}
+# this: 
+2 %>% prod(3) # takes the product of 2 and 3
+# is equal to this:
+prod(2, 3) # again, takes the product of 2 and 3
+```
+
+People generally put each argument between pipes on different lines, which makes it easier to read:  
+
+```{r}
+# this: 
+c(0:10) %>% # take the sequence of numbers from 0 to 10 
+  mean() # get the mean of it
+
+# is equal to this:
+mean(c(0:10)) # again, mean of 0, 1, 2, 3, 4, ... 10
+```
+
+Why use this operator? First, it makes working with large data frames faster. Instead of assigning multiple objects to our working environment, we can just pass multiple operations through a "pipe chain" that does it all in one step. Second, it makes code that wrangles data easier to read (once you get a hang of working with pipes, at least). More details on how the pipe works and more information about it's performance can be found in Hadley Wickham's *R for Data Science* chapter on pipes, [found here.](http://r4ds.had.co.nz/pipes.html)  
+
+## Pipe chains and `dplyr`
+Let's compare how we could manipulate and summarize data using `dplyr` and `%>%` versus an approach in `base` R. We will use the `starwars` dataset, which comes included with version `0.7.1` of `dplyr`. These data include information about Star Wars characters. What we are going to do is calculate body mass index (BMI) of each character and then compare the BMI of male and female characters. Let's load and take a look at the data:  
+
+```{r}
+data(starwars) # load data from dplyr
+glimpse(starwars) # take a look at the structure of the data
+```
+
+Now, let's see how we could compare male and female BMI using `base` R, with our results being returned in a clean data frame:  
+
+```{r}
+sw_base <- starwars # make dataset for base example
+sw_dplyr <- starwars # make dataset for dplyr example
+```
+
+```{r}
+#### BASE R ####
+sw_base$bmi <- sw_base$mass/((sw_base$height/100)^2) # calculate BMI
+sw_base <- sw_base[which(sw_base$gender %in% c("female", "male")),] # get rows that include female or male only
+base_table <- tapply(sw_base$bmi, sw_base$gender, function(x) mean(x, na.rm=TRUE)) # get mean of BMI by male or female
+base_output <- data.frame(gender=factor(names(base_table)), bmi=unname(base_table)) # save output as a data frame
+
+str(base_output) # look at structure of data
+base_output # take a look at the result
+```
+
+Note that we are assigning (`<-`) four different objects here. Now, let's look at an approach in `dplyr`:  
+
+```{r}
+#### DPLYR ####
+dplyr_output <- sw_dplyr %>% # take data
+  mutate(bmi=mass/((height/100)^2), # calculate bmi
+         gender=as.factor(gender)) %>% # make gender a factor
+  filter(gender %in% c("female", "male")) %>% # get only rows we want
+  group_by(gender) %>% # group data frame by gender
+  summarise(bmi=mean(bmi, na.rm=TRUE)) # summarize data by taking mean of bmi
+
+glimpse(dplyr_output) # look at structure of data
+dplyr_output # look at result
+```
+
+Let's now turn to how `dplyr` can be used to take raw emergency department data, tidy it, summarize it, and return a clean data frame for us to check.  
+
+# 2. Visit-arrival lag
+
+Syndromic surveillance requires very recent data, so a helpful check is making sure we are getting data in a timely fashion from emergency facilities. One way of doing this is, for each facility and for a given time period, getting the average time between (a) when a patient visited the emergency department and (b) when the first record for that patient arrived to the NSSP BioSense Platform.  
+
+This function is named `valag` in the code linked at the top of this page. Each of these functions requires a database connection, and I have coded them to be used with the `RODBC` package. (You can see [last month's](https://vimeo.com/223487612) ISDS R Users Group presentation for more information on setting up a connection using `RODBC`). But for now, I will use the masked data that has already been pulled down using `RODBC`.  
+
+We can walk through it line-by-line:  
+
+```{r}
+names <- read.csv("facilityKey.csv") %>% # get data table with faciltiy names
+  mutate(C_Biosense_Facility_ID=as.factor(C_Biosense_Facility_ID)) # make facility a factor
+```
+
+Note that every time I use the code `read.csv` here, the actual function will pull data down from a database using `RODBC`. In our data, the name of the facility is stored in a different table than where all the records are stored; however, the records do include the facility ID. So, the first thing I do is pull down the facility IDs and names from the "master facility table." I take this data, save the ID as a factor (since is a number, R wants to make it numeric), and I assign it to a data frame called `names`. Let's look at the `head` of the data:  
+
+```{r}
+head(names) # looking at first six rows
+```
+
+Now, let's pull in the records, wrangle, and summarize them:  
+
+```{r}
+out <- read.csv("valagData.csv") %>% # fetch data
+  group_by(C_BioSense_ID) %>% # group by patient visit
+  slice(which.min(Arrived_Date_Time)) %>% # take first arrived message
+  slice(1) %>% # in case multiple tie for first (same arrived date time), just take one
+  mutate(lag=as.numeric(difftime(Arrived_Date_Time, C_Visit_Date_Time, units="hours"))) %>% # calculate log between arrived and visit date time by hours
+  ungroup() %>% # explicitly ungroup for clarity
+  group_by(C_Biosense_Facility_ID) %>% # group by facility ID
+  summarise(First_Message=round(mean(lag, na.rm=TRUE),2)) %>% # get the mean lag time, removing NA, round to 2 decimal points
+  mutate(C_Biosense_Facility_ID=factor(C_Biosense_Facility_ID, levels=levels(names$C_Biosense_Facility_ID))) %>% # make factor levels same across all datasets
+  right_join(names, ., by="C_Biosense_Facility_ID") # take that data and right join it with facility names
+```
+
+The first line shows us that we are going to be creating an object named `out`. The first thing we do is bring in data (again, the function replaces this `read.csv` function with a query to a database). This raw data is then passed on to the next line using `%>%`. Each patient visit has its own ID, and the second line in this chunk groups the data set by these IDs; any operation we do now will be done separately for each group! We want to only look at the record that arrived *first*, so the next line will use `slice` to only get the row with the minimum (`which.min`) date and time of arrival. I've found that sometimes multiple records for one visit can come at once, so if there is multiple at the same time, the next line does `slice` again to only take `1` record from each group. This ensures that our dataset now has *one* record for each patient visit, and this *one* record is also the one that arrived to the BioSense Platform first.  
+
+Then we calculate the actual variable of interest using `mutate`. This new variable is called `lag`, and it is the difference between the date times of the arrival of the record and the time of the visit. I use the function `difftime` to use this, setting explicitly the time as `hours`. I also surround this whole expression with `as.numeric` so that it doesn't save the variable as a date, but instead a number.  
+
+We then want to group by facility instead of patient visit. You could technically re-group a dataset in one step, but I prefer to do it in two steps for clarity. I `ungroup` the data, and then re-group it by the facility ID. Then we use `summarise` to create a variable called `First_Message`, which is defined as the mean of the `lag`, removing `NA` values (`na.rm=TRUE`). I also use `round` to round this mean to the nearest two decimal points.  
+
+The only issue here is that it will return facility ID numbers, not the facility names. So the last two lines will merge this output with facility names. If we try to join data frames by a factor with different factor levels, we will get an error. So the `mutate` line (second to last in this chunk) makes the facility ID a factor, but note that I specify the levels as the levels from the `names` data, so that the two variables have the same factor levels.  
+
+Lastly, we perform a right join (`right_join)`. This will only keep rows that are found in the data we specify on the right-hand side. I want this to be the data we have currently constructed in our pipe chain, so I specify that on the right hand side of the function using the period. This right joins the `names` data to the current data we have in the pipe chain, by the facility ID. Let's look at what `out` looks like:  
+
+```{r}
+head(out) # get first six rows
+```
+
+## Investigating the `valag` output
+Let's say we are interested in one facility in particular. We could use `filter` to get the row for that facility:  
+
+```{r}
+filter(out, Facility_Name=="Bespin") # will return any row where the logical statement is TRUE
+```
+
+Or, how many are averaging a lag of over 24 hours?
+
+```{r}
+out %>% # take output 
+  filter(First_Message>24) %>% # get only the rows where the logical statement is TRUE 
+  nrow() # count number of rows
+```
+
+What if we want the lag in descending order, from longest to shortest?
+
+```{r}
+out %>% # take output
+  arrange(desc(First_Message)) %>% # arrange by lag time, in descending order
+  head() # take only first six rows, for the sake of this document's length
+```
+
+Lastly, what facility has the worst lag?
+
+```{r}
+slice(out, which.max(First_Message)) # return row where first message is maximum
+```
+
+Here is the function that I run:  
+
+```{r eval=FALSE}
+valag <- 
+  function(channel, begin, end, table, location="KS") {
+  
+  suppressPackageStartupMessages(require(dplyr))
+  suppressPackageStartupMessages(require(RODBC))
+    
+  names <- sqlQuery(channel, 
+    paste0("SELECT C_Biosense_Facility_ID, Facility_Name FROM ", location, "_MFT")) %>%
+    mutate(C_Biosense_Facility_ID=as.factor(C_Biosense_Facility_ID))
+    
+  out <- channel %>%
+    sqlQuery(paste0("SELECT C_Biosense_Facility_ID, C_BioSense_ID, C_Visit_Date_Time, Arrived_Date_Time
+                     FROM ", location, "_", table, "_Processed 
+                     WHERE C_Visit_Date_Time >= '", begin, "' AND C_Visit_Date_Time <= '", end, "'")) %>%
+    group_by(C_BioSense_ID) %>%
+    slice(which.min(Arrived_Date_Time)) %>%
+    slice(1) %>% 
+    mutate(lag=as.numeric(difftime(Arrived_Date_Time, C_Visit_Date_Time, units="hours"))) %>% 
+    ungroup() %>% 
+    group_by(C_Biosense_Facility_ID) %>% 
+    summarise(First_Message=round(mean(lag, na.rm=TRUE),2)) %>% 
+    mutate(C_Biosense_Facility_ID=factor(C_Biosense_Facility_ID, levels=levels(names$C_Biosense_Facility_ID))) %>% 
+    right_join(names, ., by="C_Biosense_Facility_ID")
+  
+  return(out)
+  }
+
+```
+
+Note that all of this is the same, except for now I am writing SQL queries in the `RODBC` package to get the data instead of using `read.csv`. I also save all the code as a `function` called `valag` with five arguments: channel (the connection to `RODBC`), `begin` (the time One want's to begin the search), `end` (the time one wants to end the search), `table` (if we want to use `PR` for facilities in production or `ST` for those in staging), and location (this defaults to `KS`). These character inputs are pasted into the query using the `paste0` function (which is the same as `paste`, with the default `sep=""`).    
+
+Here is an example of what a query might look like:
+
+```{r eval=FALSE}
+library(RODBC) # load RODBC
+valag(channel=odbcConnect("Biosense_Platform", "BIOSENSE\\username", "password"), # make connection to BioSense
+      begin="2017-05-01 00:00:00", # start at the beginning of May
+      end="2017-05-31 23:59:59", # end at the end of May
+      table="PR", # data in Production
+      location="KS") # from Kansas
+```
+
+This will return the output generated above. When I ran this last, it was about 540,000 records. The time from hitting enter on the function to getting the output was about 40 seconds.  
+
+# 3. Records count
+
+We would also like to know how many records are coming in per facility. This code will return a dataset that has a row for each day of a month and two columns per facility: one that has the number of record *arrivals* for that day and another column that has the number of patient *visits* for that day. This code will also use `tidyr` and `lubridate` packages, which help reshape data and handle dates, respectively. The code will follow this structure: first, we count the number of visits in a given day; second, we count the number of record arrivals in a given day; third, we merge these two together and arrange them in a tidy way. In the R code document at the beginning of this page, the function is the `rc` function. Let's look at the first part:  
+
+```{r include=FALSE}
+library(tidyr) # load package
+library(lubridate) # load package
+```
+```{r}
+out <- read.csv("rcData1.csv") %>% # data that has VISITS in a given month
+  left_join(read.csv("facilityKey.csv"), by="C_Biosense_Facility_ID") %>% # join with the same name key data we used in the previous function
+  mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(C_Visit_Date_Time), unit="day"))) %>% # floor the date, get rid of UTC
+  group_by(Facility_Name, Date) %>% # group by facility and date
+  summarise(Count=n()) %>% # get the n for each group
+  spread(Facility_Name, Count) # spread it out to wide format
+```
+
+The first line reads in the data that includes the visit date time and facility ID numbers from all records in a given month. The next line does a join with the same data that has facility name and ID that we used in the `valag` function. We want to look at the records by day, but the visit date time variable has it down to the second. What we do is use `mutate` to create a new variable called `Date`. We use the `floor_date` function to round all visit date times down to the nearest day. For example, 11:50PM on May 1st gets round down to May 1st, and so does 12:01AM. The last thing I do on this line is replace the automatic time zone that the `ymd_hms` function adds to the string.  
+
+The next line groups by two variables: facility name and date, and the next line summarizes these groups, using the `n` function to count how many rows there are for every combination of facility and date. If we leave off the last line (`spread`), then the data look like this:
+
+```{r echo=FALSE}
+read.csv("rcData1.csv") %>% # data that has VISITS in a given month
+  left_join(read.csv("facilityKey.csv"), by="C_Biosense_Facility_ID") %>% # join with the same name key data we used in the previous function
+  mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(C_Visit_Date_Time), unit="day"))) %>% # floor the date, get rid of UTC
+  group_by(Facility_Name, Date) %>% 
+  summarise(Count=n()) %>% # get the n for each group
+  head()
+```
+
+What we would like to do is *spread* out the data a little bit: We want each facility to have it's own column. We can do that by using the appropriately named `spread` function, which is the last line of the code chunk above. It is going to take each level of `Facility_Name` and fill in the cells with values from the `Count` variable. It looks like this:  
+
+```{r echo=FALSE}
+read.csv("rcData1.csv") %>% # data that has VISITS in a given month
+  left_join(read.csv("facilityKey.csv"), by="C_Biosense_Facility_ID") %>% # join with the same name key data we used in the previous function
+  mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(C_Visit_Date_Time), unit="day"))) %>% # floor the date, get rid of UTC
+  group_by(Facility_Name, Date) %>% # group by facility and date
+  summarise(Count=n()) %>% # get the n for each group
+  spread(Facility_Name, Count) %>%  # spread it out to wide format
+  select(Date:`Arvel Crynyd`) %>% 
+  head()
+```
+
+So now we have the number of visits per day, by facility. What we want now is to pull down the data for *arrivals* in a given month. The code here is mostly the exact same; the only thing different will be the data (or SQL query in the function file `rc.R` itself).  
+
+```{r}
+out <- read.csv("rcData2.csv") %>% 
+  left_join(read.csv("facilityKey.csv"), by="C_Biosense_Facility_ID") %>% # join with names %>% # join with names
+  mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(Arrived_Date_Time), unit="day"))) %>% # floor the  date
+  group_by(Facility_Name, Date) %>% # group by facility and date
+  summarise(Count=n()) %>% # get the n for each group
+  spread(Facility_Name, Count) %>% # spread it out to wide format
+  full_join(out, ., by="Date", suffix=c(" (V)", " (A)"))  # join both, suffix 
+```
+
+The only line here that is different is the last. We are doing a full join (`full_join`), joining by `Date`. The `suffix` argument tells R that we want to put " (V)" at the end of column names in the left-hand data frame (visits) and " (A)" at the end of the column names in the right-hand data frame (arrivals).  
+
+Then we do two more things:  
+
+```{r}
+out[is.na(out)] <- 0 # replace NA values with zero
+out <- out[,c("Date", sort(colnames(out)[-1]))] # rearrange columns in alphabetical order, except Date
+```
+
+When we join data frames, any blank values are filled in with `NA`. We want to replace these with zeros. Lastly, we want to sort the columns in alphabetical order, except for date. The second line re-orders the columns, with date first and the rest in alphabetical order (`sort` puts them in alphabetical order). Here's what the `head` of the data look like:  
+
+```{r}
+out[c(1:6), c(1:5)] # first six rows, first five columns
+```
+
+You can get a better look by actually viewing the entire data set:
+
+```{r echo=FALSE}
+library(DT)
+datatable(
+  out, 
+  extensions = c("FixedColumns", "Scroller"),
+  options = list(
+    dom = "t",
+    scrollX = TRUE,
+    scrollY = 500,
+    deferRender = TRUE,
+    scroller = TRUE,
+    fixedColumns = list(leftColumns = 2)
+  )
+)
+```
+  
+Feel free to scroll through and look at patterns of data drops (i.e., a streak of zeros).  
+
+Looking through these data, we can see times when there were drop outs in arrivals (zeros) but not visits (values still there). We can also see upticks after zeros in arrivals to see when there is an uptick in people "catching up" on sending the records. Here is what the function I run looks like:  
+
+```{r eval=FALSE}
+rc <- 
+  function(channel, month, year) {
+  
+  suppressPackageStartupMessages(require(RODBC))
+  suppressPackageStartupMessages(require(dplyr))
+  suppressPackageStartupMessages(require(lubridate))
+  suppressPackageStartupMessages(require(tidyr))
+  
+  out <- channel %>% 
+    sqlQuery(paste0("SELECT C_Visit_Date_Time, C_Biosense_Facility_ID FROM KS_PR_PRocessed
+                    WHERE MONTH(C_Visit_Date_Time) = ", month, " AND YEAR(C_Visit_Date_Time) = ", year)) %>% 
+    left_join(sqlQuery(channel, "SELECT C_Biosense_Facility_ID, Facility_Name FROM KS_MFT"), by="C_Biosense_Facility_ID") %>%
+    mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(C_Visit_Date_Time), unit="day"))) %>% 
+    group_by(Facility_Name, Date) %>% 
+    summarise(Count=n()) %>% 
+    spread(Facility_Name, Count) 
+  
+  out <- channel %>% 
+    sqlQuery(paste0("SELECT Arrived_Date_Time, C_Biosense_Facility_ID FROM KS_PR_PRocessed
+                    WHERE MONTH(Arrived_Date_Time) = ", month, " AND YEAR(Arrived_Date_Time) = ", year)) %>% 
+    left_join(sqlQuery(channel, "SELECT C_Biosense_Facility_ID, Facility_Name FROM KS_MFT"), by="C_Biosense_Facility_ID") %>% 
+    mutate(Date=gsub(" UTC", "", floor_date(ymd_hms(Arrived_Date_Time), unit="day"))) %>% 
+    group_by(Facility_Name, Date) %>% 
+    summarise(Count=n()) %>% 
+    spread(Facility_Name, Count) %>% 
+    full_join(out, ., by="Date", suffix=c(" (V)", " (A)"))
+  
+  out[is.na(out)] <- 0
+  out <- out[,c("Date", sort(colnames(out)[-1]))]
+  
+  return(out)
+}
+
+```
+
+You give it an `RODBC` connection (specified with the `channel` argument), a month you want (as a character, e.g., `"05"`), and a year (as a character, e.g., `"2017"`). If the code above is ran, all one has to do is run:  
+
+```{r eval=FALSE}
+rc(channel=odbcConnect("Biosense_Platform", "BIOSENSE\\username", "password"),
+   month="05",
+   year="2017")
+```
+
+# Conclusion
+
+These were a few functions we have used to keep track of how quicky and if data are coming in. Hopefully you find them useful! Again, the data and code can be found [here](https://github.com/markhwhiteii/syndromic-quality). I have written a number of other functions, such as checking for null and invalid fields, that I did not have time to touch on. If you want code for those functions, or have any other questions, please feel free to contact me, markhwhiteii@gmail.com.  
