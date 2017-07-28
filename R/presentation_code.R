@@ -1,6 +1,5 @@
-#arrived = GMT and visit = local where the visit occurred
 # prep
-setwd("~/Desktop")
+setwd("~/Desktop") # set your wd with the files from the data folder
 library(dplyr)
 library(lubridate)
 library(tidyr)
